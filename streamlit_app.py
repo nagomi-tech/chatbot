@@ -1,56 +1,85 @@
 import streamlit as st
-from openai import OpenAI
+import openai
+from langchain.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
+from langchain.chat_models import ChatOpenAI
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+def load_document(file):
+    name, extension = os.path.splitext(file.name)
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+    if extension == '.pdf':
+        loader = PyPDFLoader(file.name)
+    elif extension == '.docx':
+        loader = Docx2txtLoader(file.name)
+    elif extension == '.txt':
+        loader = TextLoader(file.name)
+    else:
+        raise ValueError('Unsupported file format')
+    
+    return loader.load()
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+def split_documents(documents, chunk_size=1000, chunk_overlap=200):
+    text_splitter = CharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    return text_splitter.split_documents(documents)
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+def create_embeddings(api_key):
+    return OpenAIEmbeddings(openai_api_key=api_key)
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+def create_vectorstore(documents, embeddings):
+    return FAISS.from_documents(documents, embeddings)
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+def create_conversation_chain(vectorstore, api_key):
+    llm = ChatOpenAI(openai_api_key=api_key, model_name='gpt-4-0613', temperature=0)
+    memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
+    return ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=vectorstore.as_retriever(),
+        memory=memory
+    )
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+def handle_user_input(user_input):
+    response = st.session_state.conversation({'question': user_input})
+    st.session_state.chat_history = response['chat_history']
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+    for i, message in enumerate(st.session_state.chat_history):
+        if i % 2 == 0:
+            st.write(f"Human: {message.content}")
+        else:
+            st.write(f"AI: {message.content}")
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+def main():
+    st.set_page_config(page_title="GPT-4 Chatbot", page_icon=":robot:")
+    st.header("GPT-4 Chatbot with Document Q&A")
+
+    if "conversation" not in st.session_state:
+        st.session_state.conversation = None
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = None
+
+    api_key = st.text_input("Enter your OpenAI API key:", type="password")
+
+    uploaded_file = st.file_uploader("Upload a document", type=['pdf', 'docx', 'txt'])
+
+    if uploaded_file and api_key:
+        documents = load_document(uploaded_file)
+        text_chunks = split_documents(documents)
+        embeddings = create_embeddings(api_key)
+        vectorstore = create_vectorstore(text_chunks, embeddings)
+        st.session_state.conversation = create_conversation_chain(vectorstore, api_key)
+
+        st.write("Document uploaded and processed. You can now ask questions about it.")
+
+    user_input = st.text_input("Ask a question about the uploaded document:")
+
+    if user_input and api_key:
+        if st.session_state.conversation:
+            handle_user_input(user_input)
+        else:
+            st.write("Please upload a document first.")
+
+if __name__ == "__main__":
+    main()

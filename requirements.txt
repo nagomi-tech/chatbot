@@ -1,2 +1,6 @@
 streamlit
 openai
+langchain 
+faiss-cpu 
+PyPDF2 
+python-docx
